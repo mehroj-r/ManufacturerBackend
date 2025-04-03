@@ -1,0 +1,6 @@
+/.venv/
+/.idea/
+/api/__pycache__/
+/app/__pycache__/
+/app/migrations/__pycache__/
+/ManufacturerBackend/__pycache__/
