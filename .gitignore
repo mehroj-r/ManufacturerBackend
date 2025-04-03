@@ -4,3 +4,4 @@
 /app/__pycache__/
 /app/migrations/__pycache__/
 /ManufacturerBackend/__pycache__/
+/app/migrations/
