@@ -16,7 +16,6 @@ class Material(models.Model):
     Model representing a material for a product.
     """
     name = models.CharField(max_length=255)
-    product = models.ManyToManyField(Product, related_name='materials', through='ProductMaterial')
 
     def __str__(self):
         return self.name
