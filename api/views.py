@@ -1,4 +1,5 @@
 from pprint import pprint
+from typing import List, Dict, Any
 
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
@@ -6,15 +7,24 @@ from rest_framework.views import APIView
 from app.models import Product, ProductMaterial, Warehouse, Material
 
 
-class ProductMaterialsAPiView(APIView):
+class ProductMaterialsAPIView(APIView):
     """
     API view to retrieve product materials.
     """
 
-    def validate_request(self, request):
+    def validate_request(self) -> None:
         """"
-        Validate the request data.
+        Validates the incoming request.
+
+        :raises ValidationError: If the request data is invalid.
+
         """
+
+        request = self.request
+
+        # Check if the data is provided
+        if not request.data:
+            raise ValidationError({"error": "No data provided."})
 
         products = request.data
 
@@ -30,53 +40,70 @@ class ProductMaterialsAPiView(APIView):
             if "product" not in product or "quantity" not in product:
                 raise ValidationError({"error": "Request must include 'product' and 'quantity'."})
 
-    def get_required_materials(self, product_quantities):
+    def get_required_materials(self, product_quantities: Dict[int, int]) -> Dict[int, List[ProductMaterial]]:
         """
         Retrieve the required materials for the given products.
-        {
-        "shim": [],
-        "mato": [],
-        }
+
+        :param product_quantities: A dictionary mapping product IDs to their quantities.
+        :return: A dictionary mapping material IDs to lists of ProductMaterial objects.
+
         """
 
-        materials = ProductMaterial.objects.filter(product_id__in=product_quantities.keys()).select_related('material')
+        materials = (ProductMaterial.objects.filter(product_id__in=product_quantities.keys())
+                     .select_related('material'))
         materials_by_type = {}
 
+        # Group the materials by their IDs
         for material in materials:
-            if material.material_id not in materials_by_type:
-                materials_by_type[material] = []
-            material.quantity *= product_quantities[material.product_id]
-            materials_by_type[material].append(material)
 
+            if material.material_id not in materials_by_type:
+                materials_by_type[material.material_id] = []
+
+            material.quantity *= product_quantities[material.product_id]
+
+            materials_by_type[material.material_id].append(material)
 
         return materials_by_type
 
-    def get_stock_materials(self, materials):
+    def get_stock_for_materials(self, product_materials: Dict[int, List[ProductMaterial]]) -> Dict[int, List[Warehouse]]:
         """
-        Get the stock materials for the given materials.
+        Get the stock materials for the required materials.
+
+        :param product_materials: A dictionary mapping material IDs to lists of ProductMaterial objects.
+        :return: A dictionary mapping material IDs to lists of Warehouse objects.
+
         """
-        material_ids = [material.material_id for material in materials.keys()]
-        stock_data = Warehouse.objects.filter(material_id__in=material_ids).order_by('price').select_related('material')
+        stock_data = (Warehouse.objects.filter(material_id__in=product_materials.keys())
+                      .order_by('price')
+                      .select_related('material'))
 
         stock = {}
 
+        # Group the stock data by material ID
         for stock_item in stock_data:
-            material = stock_item.material
+            material_id = stock_item.material_id
 
-            if material not in stock:
-                stock[material] = []
+            if material_id not in stock:
+                stock[material_id] = []
 
-            stock[material].append(stock_item)
+            stock[material_id].append(stock_item)
 
         return stock
 
-    def get_stock_for_material_quantity(self, stock, material, quantity):
+    def get_stock_distribution(self, stock: Dict[int, List[Warehouse]], material: Material, quantity: float) -> List[Dict[str, Any]]:
         """
         Get the stock for a specific material with given quantity.
+
+        :param stock: A dictionary mapping material IDs to lists of Warehouse objects.
+        :param material: The Material object for which to get the stock.
+        :param quantity: The quantity of the material needed.
+
+        :return: A list of dictionaries containing warehouse ID, material name, quantity, and price.
+
         """
 
         # if the material is not in stock, return None
-        if material not in stock:
+        if material.id not in stock:
             return [{
                 "warehouse_id": None,
                 "material": material.name,
@@ -86,32 +113,26 @@ class ProductMaterialsAPiView(APIView):
 
         stock_distribution = []
 
-        for item in stock[material]:
+        for warehouse_item in stock[material.id]:
 
             # if the stock is empty, skip
-            if item.remainder <= 0:
+            if warehouse_item.remainder <= 0:
                 continue
 
-            # if the stock is enough, take whole and stop
-            if item.remainder >= quantity:
-                stock_distribution.append({
-                    "warehouse_id": item.id,
-                    "material": material.name,
-                    "qty": quantity,
-                    "price": item.price
-                })
-                item.remainder -= quantity
-                quantity = 0
-                break
-            else: # if the stock is not enough, take all of it and continue
-                stock_distribution.append({
-                    "warehouse_id": item.id,
-                    "material": material.name,
-                    "qty": item.remainder,
-                    "price": item.price
-                })
-                quantity -= item.remainder
-                item.remainder = 0
+            # If the remainder is less than the quantity needed, take all of it
+            # Otherwise, take the quantity needed
+            take_quantity = min(warehouse_item.remainder, quantity)
+
+            stock_distribution.append({
+                "warehouse_id": warehouse_item.id,
+                "material": material.name,
+                "qty": take_quantity,
+                "price": warehouse_item.price
+            })
+
+            # Update quantity and remainder
+            warehouse_item.remainder -= take_quantity
+            quantity -= take_quantity
 
         # if there is still quantity left, add it with None values to indicate not enough stock
         if quantity > 0:
@@ -124,13 +145,13 @@ class ProductMaterialsAPiView(APIView):
 
         return stock_distribution
 
-    def post(self, request, *args, **kwargs):
+    def post(self, request, *args, **kwargs) -> Response:
         """
         Handle POST requests to receive request details.
         """
 
-        # Validate the request data
-        self.validate_request(request)
+        # Validate the request
+        self.validate_request()
 
         # Extract the products from the request data
         products_data = request.data
@@ -142,10 +163,10 @@ class ProductMaterialsAPiView(APIView):
 
 
         # Get the required materials for the products
-        materials = self.get_required_materials(product_quantities)
+        product_materials = self.get_required_materials(product_quantities)
 
         # Get the stock materials
-        stock = self.get_stock_materials(materials)
+        stock = self.get_stock_for_materials(product_materials)
 
         # Prepare the response data
         result = []
@@ -158,22 +179,24 @@ class ProductMaterialsAPiView(APIView):
 
             product_name = products[product_id].name
             product_qty = product_quantities[product_id]
-            product_materials = []
+            current_product_materials = []
 
-            for material_list in materials.values():
+            # Iterate through the materials for the current product
+            for material_list in product_materials.values():
                 for product_material in material_list:
                     if product_material.product_id == product_id:
                         quantity = product_material.quantity
 
-                        stock_distribution = self.get_stock_for_material_quantity(stock, product_material.material, quantity)
+                        # Get the stock distribution for the material
+                        stock_distribution = self.get_stock_distribution(stock, product_material.material, quantity)
 
-                        product_materials.extend(stock_distribution)
+                        current_product_materials.extend(stock_distribution)
 
             # Add the product details to the result
             result.append({
                 "product_name": product_name,
                 "product_qty": product_qty,
-                "product_materials": product_materials
+                "product_materials": current_product_materials
             })
 
 
